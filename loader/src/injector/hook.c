@@ -1051,15 +1051,6 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   FLAG_SET(ctx, APP_SPECIALIZE);
 
-  /* INFO: We are still in the privileged (zygote-domain) pre-specialize window
-              here. If any modules are loaded, open a NoHello capability session
-              now so that hidden module libraries can still be unhidden/unmapped
-              during post-specialize unload, after the process drops to its app
-              domain (closed at the end of rz_run_modules_post). No-op / token 0
-              when NoHello is unavailable. */
-  if (zygisk_module_length > 0)
-    ctx->nh_session_token = csoloader_nohello_session_open((uintptr_t)start_addr, (uintptr_t)start_addr + block_size);
-
   /* INFO: Isolated services have different UIDs than the main apps. Because
               numerous root implementations base themselves in the UID of the
               app, we need to ensure that the UID sent to ReZygiskd to search
@@ -1101,6 +1092,22 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   }
 
   ctx->info_flags = rezygiskd_get_process_flags(uid, ctx->process);
+
+  /* INFO: Hide the module libraries into NoHello syscall-244 memory ONLY for
+              DenyListed apps - never the zygote, system_server, or non-DenyList
+              apps. We are still in the privileged pre-specialize (zygote-domain)
+              window, so syscall 244 is authorized and the modules (loaded once in
+              the zygote and inherited here) are hidden in place, before their
+              hooks run. A capability session is opened first so the post-specialize
+              unload (rz_run_modules_post) can still unmap the hidden memory after
+              the process drops to its app domain; it is closed there. */
+  if (zygisk_module_length > 0 && (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST) {
+    ctx->nh_session_token = csoloader_nohello_session_open((uintptr_t)start_addr, (uintptr_t)start_addr + block_size);
+
+    for (size_t i = 0; i < zygisk_module_length; i++)
+      csoloader_hide(&zygisk_modules[i].lib);
+  }
+
   /* INFO: To ensure we are really using a clean mount namespace, we use
               the first process it as reference for clean mount namespace,
               before it even does something, so that it will be clean yet
