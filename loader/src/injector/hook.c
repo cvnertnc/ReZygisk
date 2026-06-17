@@ -80,6 +80,11 @@ struct zygisk_context {
   size_t register_info_count;
   struct ignore_info ignore_info[MAX_IGNORE_INFO];
   size_t ignore_info_count;
+
+  /* INFO: NoHello capability-session token (syscall 244), opened in the
+              pre-specialize window so hidden module libraries can still be
+              unhidden/unmapped during post-specialize unload. 0 = no session. */
+  unsigned long long nh_session_token;
 };
 
 /* INFO: Current context */
@@ -1032,10 +1037,28 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
 
   if (zygisk_module_length > 0)
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
+
+  /* INFO: All late unhide/unmap (CMD_MUNMAP) for unloaded modules is done, so
+              deauthorize syscall 244 for this process immediately by closing the
+              session opened in rz_app_specialize_pre. Guarded by the token, so it
+              is a no-op for paths that never opened one (e.g. system_server). */
+  if (ctx->nh_session_token != 0) {
+    csoloader_nohello_session_close(ctx->nh_session_token);
+    ctx->nh_session_token = 0;
+  }
 }
 
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   FLAG_SET(ctx, APP_SPECIALIZE);
+
+  /* INFO: We are still in the privileged (zygote-domain) pre-specialize window
+              here. If any modules are loaded, open a NoHello capability session
+              now so that hidden module libraries can still be unhidden/unmapped
+              during post-specialize unload, after the process drops to its app
+              domain (closed at the end of rz_run_modules_post). No-op / token 0
+              when NoHello is unavailable. */
+  if (zygisk_module_length > 0)
+    ctx->nh_session_token = csoloader_nohello_session_open((uintptr_t)start_addr, (uintptr_t)start_addr + block_size);
 
   /* INFO: Isolated services have different UIDs than the main apps. Because
               numerous root implementations base themselves in the UID of the
