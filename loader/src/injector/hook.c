@@ -1038,11 +1038,16 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
   if (zygisk_module_length > 0)
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
 
-  /* INFO: All late unhide/unmap (CMD_MUNMAP) for unloaded modules is done, so
-              deauthorize syscall 244 for this process immediately by closing the
-              session opened in rz_app_specialize_pre. Guarded by the token, so it
-              is a no-op for paths that never opened one (e.g. system_server). */
-  if (ctx->nh_session_token != 0) {
+  /* INFO: Close the session NOW only if every module was unloaded - then no hidden
+              regions remain and syscall 244 should be re-locked immediately. If any
+              module was abandoned (stays resident), its hidden regions live on and may
+              still need a late self-unmap, and any fork of this process must inherit the
+              capability to manage them - so the session is left open and dropped by the
+              kernel at mm teardown (nohello_session_drop), the "leaked-open, freed-at-
+              mm-teardown" lifetime. fork() inheritance is handled kernel-side
+              (nohello_session_inherit from the copy_process hook). Guarded by the token,
+              so it is a no-op for paths that never opened one (e.g. system_server). */
+  if (ctx->nh_session_token != 0 && modules_unloaded == zygisk_module_length) {
     csoloader_nohello_session_close(ctx->nh_session_token);
     ctx->nh_session_token = 0;
   }
