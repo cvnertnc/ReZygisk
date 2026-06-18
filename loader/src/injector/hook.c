@@ -1038,16 +1038,19 @@ static void rz_run_modules_post(struct zygisk_context *ctx) {
   if (zygisk_module_length > 0)
     LOGD("Modules unloaded: %zu/%zu", modules_unloaded, zygisk_module_length);
 
-  /* INFO: Close the session NOW only if every module was unloaded - then no hidden
-              regions remain and syscall 244 should be re-locked immediately. If any
-              module was abandoned (stays resident), its hidden regions live on and may
-              still need a late self-unmap, and any fork of this process must inherit the
-              capability to manage them - so the session is left open and dropped by the
-              kernel at mm teardown (nohello_session_drop), the "leaked-open, freed-at-
-              mm-teardown" lifetime. fork() inheritance is handled kernel-side
-              (nohello_session_inherit from the copy_process hook). Guarded by the token,
-              so it is a no-op for paths that never opened one (e.g. system_server). */
-  if (ctx->nh_session_token != 0 && modules_unloaded == zygisk_module_length) {
+  /* INFO: Close the session now that specialization is finalized. By this point
+              every syscall-244 operation is done: the hide/copy ran in the
+              pre-specialize window and the post-specialize unmaps ran in the loop
+              above; this close is the last 244 and is still exempt because the
+              session is active until it returns. A resident module needs NO open
+              session afterwards - its lib already lives in hidden memory and is
+              reclaimed kernel-side at mm teardown (free_pmd_range / exit_mmap hooks),
+              which do not consult the session. Holding it open for the whole process
+              life would leave syscall 244 seccomp-exempt for the app's entire runtime
+              (a sandbox-escape surface), so we re-lock it here unconditionally. Guarded
+              by the token, so it is a no-op for paths that never opened one (e.g.
+              system_server). */
+  if (ctx->nh_session_token != 0) {
     csoloader_nohello_session_close(ctx->nh_session_token);
     ctx->nh_session_token = 0;
   }
